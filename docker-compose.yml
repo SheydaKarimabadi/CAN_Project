@@ -1,0 +1,197 @@
+version: "3.9"
+
+networks:
+  kafka_net:
+    driver: bridge
+
+services:
+
+  # ============================
+  # ZOOKEEPER
+  # ============================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    networks:
+      - kafka_net
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+
+  # ============================
+  # KAFKA
+  # ============================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    networks:
+      - kafka_net
+    depends_on:
+      - zookeeper
+        
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+
+
+
+  # ============================
+  # REDIS
+  # ============================
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    networks:
+      - kafka_net
+    ports:
+      - "6379:6379"
+
+
+  # ============================
+  # APP BASE IMAGE (interactive)
+  # ============================
+  app:
+    build: .
+    image: kafka_can_project-app
+    container_name: app
+    networks:
+      - kafka_net
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./results:/app/results
+    tty: true
+    command: bash
+
+  # ============================
+  # KAFKA → REDIS STREAM SINK
+  # ============================
+  kafka_to_redis_sink:
+    image: kafka_can_project-app
+    container_name: kafka_to_redis_sink
+    networks:
+      - kafka_net
+    depends_on:
+      - kafka
+       
+      - redis
+        
+    command: python /app/src/kafka_to_redis_sink.py
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./src:/app/src
+
+  # ============================
+  # CONSUMER PREDICT (LightGBM)
+  # ============================
+  consumer_predict:
+    image: kafka_can_project-app
+    container_name: consumer_predict
+    networks:
+      - kafka_net
+    depends_on:
+      - kafka
+        
+      - redis
+        
+    command: python /app/src/consumer_predict.py
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./src:/app/src
+      - ./results:/app/results
+
+  # ============================
+  # PRODUCER
+  # ============================
+  producer:
+    image: kafka_can_project-app
+    container_name: producer_final
+    networks:
+      - kafka_net
+    depends_on:
+      - kafka
+        
+    command: python /app/src/producer_final.py
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+
+  # ============================
+  # PROMETHEUS
+  # ============================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    networks:
+      - kafka_net
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - kafka_to_redis_sink
+      - consumer_predict
+        
+
+  # ============================
+  # GRAFANA
+  # ============================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    networks:
+      - kafka_net
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3000:3000"
+    depends_on:
+     - prometheus
+  # ============================
+  # kafka_exporter
+  # ============================
+  kafka_exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: kafka_exporter
+    networks:
+      - kafka_net
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_EXPORTER_CONSUMER_GROUPS=kafka_to_redis_sink,consumer_predict
+    ports:
+      - "9308:9308"
+    depends_on:
+      - kafka
+    command: bash
+  # ============================
+  # lite_kafka_monitor
+  # ============================
+
+  lite_kafka_monitor:
+    image: kafka_can_project-app
+    container_name: lite_kafka_monitor
+    networks:
+      - kafka_net
+    depends_on:
+      - kafka
+    volumes:
+      - ./src:/app/src
+    command: bash
+
+
